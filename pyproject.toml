@@ -1,0 +1,16 @@
+[project]
+name = "vqvae-nnx"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets[vision]>=4.3.0",
+    "einops>=0.8.1",
+    "flax>=0.12.0",
+    "ipdb>=0.13.13",
+    "jax>=0.8.0",
+    "jupyterlab>=4.5.0",
+    "optax>=0.2.6",
+    "tyro>=0.9.35",
+]
