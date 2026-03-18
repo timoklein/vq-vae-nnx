@@ -1,9 +1,13 @@
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+
+jax.config.update("jax_disable_jit", True)
 import optax
+import orbax.checkpoint as ocp
 import tyro
 from datasets import load_dataset
 from flax import nnx
@@ -19,7 +23,7 @@ class Config:
 
     batch_size: int = 128
     learning_rate: float = 0.01
-    num_epochs: int = 50
+    num_epochs: int = 1
 
 
 class VQVAE(nnx.Module):
@@ -50,7 +54,6 @@ class VQVAE(nnx.Module):
         x = self.avgpool(nnx.relu(self.bn1(self.dropout1(self.conv1(x), rngs=rngs))))
         x = self.avgpool(nnx.relu(self.bn2(self.conv2(x))))
         x = self.conv3(x)
-
         return x
 
     def decode(self, z: jax.Array) -> jax.Array:
@@ -59,12 +62,10 @@ class VQVAE(nnx.Module):
         z = nnx.sigmoid(self.deconv3(z))  # Output in [0, 1]
         return z
 
-    def quantize(self, z_e: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def quantize(self, z_e: jax.Array) -> jax.Array:
         b, h, w, c = z_e.shape
         # Sanity check. Must use checkify to be jittable.
-        jax.experimental.checkify.check(
-            c == self.embedding.embedding.value.shape[1], "Latent dimension mismatch between encoder and embedding."
-        )
+        assert c == self.embedding.embedding.value.shape[1], "Latent dimension mismatch"
         z_flattened = z_e.reshape(b * h * w, c)
 
         def calculate_distances(z: jax.Array, codes: jax.Array) -> jax.Array:
@@ -81,7 +82,7 @@ class VQVAE(nnx.Module):
 
         return z_q
 
-    def __call__(self, x: jax.Array, rngs: nnx.Rngs) -> tuple[jax.Array, jax.Array]:
+    def __call__(self, x: jax.Array, rngs: nnx.Rngs) -> tuple[jax.Array, jax.Array, jax.Array]:
         z_e = self.encode(x, rngs)
         # Quantization step would go here
         z_q = self.quantize(z_e)
@@ -137,6 +138,9 @@ if __name__ == "__main__":
 
     train_step_jit = nnx.jit(train_step, static_argnames=("commitment_cost",), donate_argnames=("model", "optimizer"))
 
+    ckpt_dir = Path("checkpoints/vqvae").resolve()
+    checkpointer = ocp.StandardCheckpointer()
+
     for epoch in range(cfg.num_epochs):
         for step, batch in enumerate(dataset["train"].iter(batch_size=cfg.batch_size)):
             model.train()
@@ -144,10 +148,15 @@ if __name__ == "__main__":
             # Normalize here and not in forward to prevent from computing the loss against unnormalized data
             x = x.astype(jnp.float32) / 255.0  # Normalize to [0, 1]
 
-            train_step(model, x, optimizer, cfg.commitment_cost, rngs, metrics)
+            train_step_jit(model, x, optimizer, cfg.commitment_cost, rngs, metrics)
 
             computed = metrics.compute()
             print(
                 f"Epoch {epoch}, Step {step}, Loss: {computed['loss']:.4f}, "
                 f"Recon: {computed['recon_loss']:.4f}, Commit: {computed['commitment_loss']:.4f}"
             )
+
+        _, state = nnx.split(model)
+        checkpointer.save(ckpt_dir / f"epoch_{epoch}", state, force=True)
+        checkpointer.wait_until_finished()
+        print(f"Checkpoint saved to {ckpt_dir / f'epoch_{epoch}'}")
